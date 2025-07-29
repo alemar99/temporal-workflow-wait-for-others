@@ -3,7 +3,6 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from activities import get_running_download_workflows
 from workflows import CleanupWorkflow, DownloadWorkflow, MasterWorkflow
 
 
@@ -14,7 +13,7 @@ async def main():
         client,
         task_queue="region",
         workflows=[DownloadWorkflow, CleanupWorkflow, MasterWorkflow],
-        activities=[get_running_download_workflows],
+        activities=[],
     )
     await worker.run()
 
