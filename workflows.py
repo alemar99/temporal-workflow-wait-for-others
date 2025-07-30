@@ -1,21 +1,40 @@
 import asyncio
+from dataclasses import dataclass
+from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from activities import SHA_PREFIX_LENGTH, MyActivity, WorkflowShasParam
+
+MASTER_WORKFLOW_ID = "master-workflow"
+CLEANUP_WORKFLOW_ID = "cleanup-workflow"
+
+
+@dataclass
+class DownloadFileParam:
+    duration: int
+    sha256: str
+
+
+@dataclass
+class MasterInputParam:
+    startup_sleep_duration: int
+    files: list[DownloadFileParam]
+
 
 @workflow.defn
 class DownloadWorkflow:
     @workflow.run
-    async def run(self, duration: int, sha256: str) -> None:
-        print(f"Start download wf for file: {sha256[:7]}")
-        await asyncio.sleep(duration)
+    async def run(self, input: DownloadFileParam) -> None:
+        print(f"Start download wf for file: {input.sha256[:SHA_PREFIX_LENGTH]}")
+        await asyncio.sleep(input.duration)
         handle = workflow.get_external_workflow_handle_for(
-            MasterWorkflow.run, "master-workflow"
+            MasterWorkflow.run, MASTER_WORKFLOW_ID
         )
-        await handle.signal(MasterWorkflow.file_completed_download, sha256)
-        print(f"File {sha256[:7]} completed download.")
+        await handle.signal(MasterWorkflow.file_completed_download, input.sha256)
+        print(f"File {input.sha256[:SHA_PREFIX_LENGTH]} completed download.")
 
 
 @workflow.defn
@@ -27,6 +46,7 @@ class CleanupWorkflow:
         await asyncio.sleep(2)
 
         await self._do_cleanup()
+        print("End CleanupWorkflow")
 
     async def _do_cleanup(self) -> None:
         workflow.logger.info("Starting cleanup")
@@ -43,26 +63,35 @@ class MasterWorkflow:
         self._files_to_download = set()
 
     @workflow.run
-    async def run(self) -> None:
+    async def run(self, input: MasterInputParam) -> None:
         print("Start MasterWorkflow")
         # calculate which files need to be downloaded
-        await asyncio.sleep(3)
+        await asyncio.sleep(input.startup_sleep_duration)
         print("Files to download calculated")
-        self._files_to_download = {"1" * 64, "2" * 64, "3" * 64}
+        self._files_to_download = {f.sha256 for f in input.files}
+
+        await workflow.execute_activity(
+            MyActivity.cancel_not_matching_workflows,
+            WorkflowShasParam(shas_to_download=self._files_to_download),
+            start_to_close_timeout=timedelta(seconds=30),
+        )
 
         download_workflows = []
-        for sha, duration in zip(sorted(self._files_to_download), [3, 9, 20]):
+        for file in input.files:
             try:
                 download_workflows.append(
+                    # FIXME
                     await workflow.start_child_workflow(
                         DownloadWorkflow.run,
-                        args=[duration, sha],
-                        id=f"download-workflow-{sha[:7]}",
+                        arg=file,
+                        id=f"download-workflow-{file.sha256[:SHA_PREFIX_LENGTH]}",
                         parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                     )
                 )
             except WorkflowAlreadyStartedError:
-                print(f"Download wf for {sha[:7]} already running")
+                print(
+                    f"Download wf for {file.sha256[:SHA_PREFIX_LENGTH]} already running"
+                )
                 workflow.logger.info(
                     "Some workflows were already running, skipping them..."
                 )
@@ -74,14 +103,16 @@ class MasterWorkflow:
         # execute_child_workflow waits for the completion of child workflows
         await workflow.execute_child_workflow(
             CleanupWorkflow.run,
-            id="cleanup-workflow",
+            id=CLEANUP_WORKFLOW_ID,
             parent_close_policy=workflow.ParentClosePolicy.TERMINATE,
             id_reuse_policy=WorkflowIDReusePolicy.TERMINATE_IF_RUNNING,
         )
 
+        print("End MasterWorkflow")
+
     @workflow.signal
     def file_completed_download(self, sha256: str) -> None:
-        print(f"Signal received for file: {sha256[:7]}")
+        print(f"Signal received for file: {sha256[:SHA_PREFIX_LENGTH]}")
         try:
             self._files_to_download.remove(sha256)
         except KeyError:
