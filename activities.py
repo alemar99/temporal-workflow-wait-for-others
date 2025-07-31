@@ -1,22 +1,30 @@
 from dataclasses import dataclass
-from temporalio import activity
 from temporalio.client import Client
+from temporalio import activity
+
+SHA_PREFIX_LENGTH = 7
 
 
-async def get_temporal_client() -> Client:
-    return await Client.connect("localhost:7233")
+class BaseActivity:
+    def __init__(self, client: Client) -> None:
+        self.temporal_client = client
 
 
 @dataclass
-class GetRunningWorkflows:
-    count: int
+class WorkflowShasParam:
+    shas_to_download: list[str]
 
 
-@activity.defn
-async def get_running_download_workflows() -> GetRunningWorkflows:
-    client = await get_temporal_client()
+class MyActivity(BaseActivity):
+    @activity.defn
+    async def cancel_not_matching_workflows(self, param: WorkflowShasParam) -> None:
+        shas_to_download = [sha[:SHA_PREFIX_LENGTH] for sha in param.shas_to_download]
 
-    execution_count = await client.count_workflows(
-        "WorkflowType='DownloadWorkflow' AND ExecutionStatus='Running'"
-    )
-    return GetRunningWorkflows(count=execution_count.count)
+        async for wf in self.temporal_client.list_workflows(
+            query="WorkflowType='DownloadWorkflow' AND ExecutionStatus='Running'"
+        ):
+            sha = wf.id.removeprefix("download-workflow-")
+            if sha not in shas_to_download:
+                handle = self.temporal_client.get_workflow_handle(wf.id)
+                print(f"Canceling workflow with id: {wf.id}")
+                await handle.cancel()

@@ -3,18 +3,19 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from activities import get_running_download_workflows
+from activities import MyActivity
 from workflows import CleanupWorkflow, DownloadWorkflow, MasterWorkflow
 
 
 async def main():
     client = await Client.connect("localhost:7233", namespace="default")
+    activity = MyActivity(client)
     # Run the worker
     worker = Worker(
         client,
         task_queue="region",
         workflows=[DownloadWorkflow, CleanupWorkflow, MasterWorkflow],
-        activities=[get_running_download_workflows],
+        activities=[activity.cancel_not_matching_workflows],
     )
     await worker.run()
 
